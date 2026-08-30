@@ -6,6 +6,14 @@ Include at least one prompt that produced something wrong, and what you did abou
 
 If you did not use AI at all, say so here, and describe your process instead.
 
+
+
+
+
+
+
+
+# 1.
 ## <What you were trying to achieve>
 I was trying to gather knowledge about similar things that exist to this and the technologies or frameworks that can be used in this
 
@@ -41,6 +49,23 @@ A trial period before a subscription's first invoice.
 
 
 this is a breif about a project i am building can you do a deep research on the related projects that are there, the things that can be used to build it and give me a comprehensive report
+```
+
+### What you got
+this file
+docs\Billing System Development Research.pdf
+
+### What you corrected
+Its majorly a reference Knowledge document, so required no edits
+
+
+# 2.
+## <What you were trying to achieve>
+I want to setup env config
+
+### Prompt
+```
+We have a basic frontend working and basic backend working I want to connect both of them, just show the health endpoint of backend visible on frontend 
 ```
 
 ### What you got
