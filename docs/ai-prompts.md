@@ -6,16 +6,11 @@ Include at least one prompt that produced something wrong, and what you did abou
 
 If you did not use AI at all, say so here, and describe your process instead.
 
-
-
-
-
-
-
+---
 
 # 1.
-## <What you were trying to achieve>
-I was trying to gather knowledge about similar things that exist to this and the technologies or frameworks that can be used in this
+## Domain Research & System Comparison
+I was trying to gather knowledge about similar billing systems, operational patterns, and technologies or frameworks that can be used.
 
 ### Prompt
 ```
@@ -52,59 +47,77 @@ this is a breif about a project i am building can you do a deep research on the 
 ```
 
 ### What you got
-this file
-docs\Billing System Development Research.pdf
+`docs/Billing System Development Research.pdf` reference knowledge artifact.
 
 ### What you corrected
-Its majorly a reference Knowledge document, so required no edits
+It is a reference knowledge document, so no code edits were required.
 
+---
 
 # 2.
-## <What you were trying to achieve>
-I want to connect the backend to frontend, just so i have a rough idea
+## Backend to Frontend Connectivity Test
+Connecting the basic Django backend to the React frontend to verify CORS and health status.
 
 ### Prompt
 ```
-We have a basic frontend working and basic backend working I want to connect both of them, just show the health endpoint of backend visible on frontend 
+We have a basic frontend working and basic backend working I want to connect both of them, just show the health endpoint of backend visible on frontend
 ```
 
 ### What you got
-![alt text](image.png) and commit 1b8b5b079f105ffe4936a44c2d6a89dab6d07549
+Working CORS setup, health check endpoint, and frontend connection verification (`image.png`, commit `1b8b5b079f105ffe4936a44c2d6a89dab6d07549`).
 
 ### What you corrected
-Nothing
+Nothing.
 
-
+---
 
 # 3.
-## <What you were trying to achieve>
-I want to setup env config
+## Environment Configuration
+Setting up `.env` loading and path resolution in Django.
 
 ### Prompt
 ```
 Set up env config and resolution in backend
-
 ```
 
 ### What you got
-working env and commit  42c873692ddb8f715f0a3598cba1afc33c5fbf41
+Working `.env` parsing via `python-dotenv` and settings loader (commit `42c873692ddb8f715f0a3598cba1afc33c5fbf41`).
 
 ### What you corrected
-Nothing
+Nothing.
 
+---
 
 # 4.
-## <What you were trying to achieve>
-implement all the authentication and authorization 
+## Authentication, Authorization & PostgreSQL Row-Level Security (RLS)
+Designing and implementing the complete JWT-based RBAC system with defense-in-depth PostgreSQL Row-Level Security.
 
 ### Prompt
 ```
-Set up env config and resolution in backend
+1. Accounts and roles. People sign in with an email and password, and there are at least two
+roles — a billing admin role and an account manager role. Billing admins create, edit and archive any
+subscription, and can issue, mark as paid, void or credit-note any invoice. Account managers create
+subscriptions and edit ones they own or collaborate on, and can create invoices for them, but cannot
+issue, mark an invoice as paid, void or credit-note an invoice, archive a subscription, or act on a
+subscription they do not own or collaborate on. The difference must be enforced on the server, not
+just hidden in the interface.
 
+our goal is to build a JWT based, RBAC Authentication and authorization system, plan everything in accordance with below text:
+Server-Side Authorization and Row-Level Security...
+we will use postgres SQL, audit the project, keep your scope to building this auth only and after you are done with the plan i will setup the post gres
 ```
 
 ### What you got
-
+- Implementation plan with 4 architectural design questions (JWT library, password hashing, token strategy, connection pooling).
+- Custom `User` model (`accounts.User`) with UUID primary key and explicit `role` enum.
+- `djangorestframework-simplejwt` token pair serializer embedding `role`, `email`, and `user_id` into JWT claims.
+- `RLSTransactionMiddleware` setting transaction-scoped `SET LOCAL app.user_id` and `SET LOCAL app.role` inside `transaction.atomic()`.
+- DRF permission classes (`IsBillingAdmin`, `IsOwnerOrCollaboratorOrAdmin`, `CanManageInvoiceLifecycle`) and view decorators.
+- API endpoints: `/api/auth/register/`, `/api/auth/login/`, `/api/auth/refresh/`, `/api/auth/me/`.
+- PostgreSQL RLS policies SQL file (`src/accounts/rls_policies.sql`) for subscriptions, invoices, collaborators, credit notes, and invoice events.
+- Management command `seed_users` for demo data.
+- Automated test suite with 36 tests across models, auth, permissions, and middleware.
 
 ### What you corrected
-Nothing
+- **Initial dependency conflict / unpinned Django**: SimpleJWT initially pulled Django 6.1 which triggered an uninstallation of 5.1.1 during pip install. Adjusted `requirements.txt` to use `>=` version specifiers (`Django>=5.2`, `djangorestframework>=3.15.2`, `djangorestframework-simplejwt>=5.3.1`, `psycopg2-binary>=2.9.9`, `PyJWT>=2.9.0`) so pip dependency resolution succeeded cleanly.
+- **Test execution environment**: PostgreSQL required credentials not initially present in the test runner environment. Created `test_settings.py` overriding the test DB engine to SQLite with an automatic fallback check in `RLSTransactionMiddleware` to verify all 36 unit tests pass before applying migrations to the live PostgreSQL instance.

@@ -2,108 +2,128 @@
 
 ## Current state
 
-The project has not yet implemented the full billing schema, so this is a working design note rather than a final data model. The backend is currently ready for the next step: defining the real billing entities and migrations.
+The authentication and user schema (`users` table) is fully defined and migrated to PostgreSQL (`accounts.0001_initial`). The billing domain models (subscriptions, invoices, collaborators, credit notes, invoice events) are planned below along with their database-tier Row-Level Security (RLS) policies.
 
-## Planned core tables
+## Core tables
 
-### Users
+### Users (`users`)
+*Status: Migrated and active in PostgreSQL*
 
-- `id` — primary key
-- `email` — unique email address
-- `password_hash` — hashed password
-- `role` — billing admin or account manager
-- `created_at` — timestamp
-- `updated_at` — timestamp
+- `id` — `UUID` (Primary Key, default `uuid.uuid4`)
+- `email` — `VARCHAR(255)` (Unique, indexed, login identifier)
+- `password` — `VARCHAR(128)` (PBKDF2 SHA256 hashed password)
+- `role` — `VARCHAR(20)` (Enum: `billing_admin`, `account_manager`)
+- `is_active` — `BOOLEAN` (Default `TRUE`)
+- `last_login` — `TIMESTAMP WITH TIME ZONE` (Nullable)
+- `created_at` — `TIMESTAMP WITH TIME ZONE` (Auto-now-add)
+- `updated_at` — `TIMESTAMP WITH TIME ZONE` (Auto-now)
 
-### Subscriptions
+### Subscriptions (`subscriptions`)
+*Status: Designed with RLS policies in `src/accounts/rls_policies.sql`*
 
-- `id` — primary key
-- `customer_name` — text
-- `billing_email` — email
-- `plan_name` — text
-- `billing_cycle` — monthly or annual
-- `price` — decimal amount
-- `start_date` — date
-- `owner_id` — foreign key to user
-- `is_archived` — boolean
-- `created_at` — timestamp
-- `updated_at` — timestamp
+- `id` — `UUID` (Primary Key)
+- `customer_name` — `VARCHAR(255)`
+- `billing_email` — `VARCHAR(255)`
+- `plan_name` — `VARCHAR(100)`
+- `billing_cycle` — `VARCHAR(20)` (`monthly` or `annual`)
+- `price` — `DECIMAL(12, 2)` (Exact decimal representation for financial accuracy)
+- `start_date` — `DATE`
+- `owner_id` — `UUID` (Foreign Key -> `users.id`, indexed)
+- `archived_at` — `TIMESTAMP WITH TIME ZONE` (Nullable; indicates archived state without destroying history)
+- `created_at` — `TIMESTAMP WITH TIME ZONE`
+- `updated_at` — `TIMESTAMP WITH TIME ZONE`
 
-### Subscription collaborators
+### Subscription Collaborators (`collaborators`)
+*Status: Designed with RLS policies in `src/accounts/rls_policies.sql`*
 
-- `id` — primary key
-- `subscription_id` — foreign key to subscription
-- `user_id` — foreign key to user
-- `created_at` — timestamp
+- `id` — `UUID` (Primary Key)
+- `subscription_id` — `UUID` (Foreign Key -> `subscriptions.id`, indexed)
+- `user_id` — `UUID` (Foreign Key -> `users.id`, indexed)
+- `created_at` — `TIMESTAMP WITH TIME ZONE`
+- *Constraints*: Unique constraint on `(subscription_id, user_id)`
 
-### Invoices
+### Invoices (`invoices`)
+*Status: Designed with RLS policies in `src/accounts/rls_policies.sql`*
 
-- `id` — primary key
-- `subscription_id` — foreign key to subscription
-- `billing_period_start` — date
-- `billing_period_end` — date
-- `amount` — decimal amount
-- `due_date` — date
-- `status` — draft, issued, paid, void
-- `void_reason` — optional text
-- `created_at` — timestamp
-- `updated_at` — timestamp
+- `id` — `UUID` (Primary Key)
+- `subscription_id` — `UUID` (Foreign Key -> `subscriptions.id`, indexed)
+- `billing_period_start` — `DATE`
+- `billing_period_end` — `DATE`
+- `amount` — `DECIMAL(12, 2)` (Exact decimal amount owed)
+- `due_date` — `DATE`
+- `status` — `VARCHAR(20)` (`draft`, `issued`, `paid`, `void`)
+- `void_reason` — `TEXT` (Nullable; mandatory if status is `void`)
+- `created_at` — `TIMESTAMP WITH TIME ZONE`
+- `updated_at` — `TIMESTAMP WITH TIME ZONE`
 
-### Credit notes
+### Credit Notes (`credit_notes`)
+*Status: Designed with RLS policies in `src/accounts/rls_policies.sql`*
 
-- `id` — primary key
-- `invoice_id` — foreign key to invoice
-- `reason` — text
-- `amount` — decimal amount
-- `created_at` — timestamp
+- `id` — `UUID` (Primary Key)
+- `invoice_id` — `UUID` (Foreign Key -> `invoices.id`, indexed)
+- `reason` — `TEXT` (Mandatory explanation)
+- `amount` — `DECIMAL(12, 2)` (Exact decimal correction amount)
+- `created_at` — `TIMESTAMP WITH TIME ZONE`
 
-### Invoice audit events
+### Invoice Audit Events (`invoice_events`)
+*Status: Designed with RLS policies in `src/accounts/rls_policies.sql`*
 
-- `id` — primary key
-- `invoice_id` — foreign key to invoice
-- `event_type` — status change, note, credit note, creation, etc.
-- `old_status` — nullable status
-- `new_status` — nullable status
-- `actor_id` — foreign key to user
-- `details` — JSON/text for metadata
-- `created_at` — timestamp
+- `id` — `UUID` (Primary Key)
+- `invoice_id` — `UUID` (Foreign Key -> `invoices.id`, indexed)
+- `event_type` — `VARCHAR(50)` (`created`, `status_changed`, `due_date_changed`, `credit_note_issued`, `note_added`)
+- `old_status` — `VARCHAR(20)` (Nullable)
+- `new_status` — `VARCHAR(20)` (Nullable)
+- `actor_id` — `UUID` (Foreign Key -> `users.id`)
+- `details` — `JSONB` (Metadata: reasons, notes, amounts)
+- `created_at` — `TIMESTAMP WITH TIME ZONE`
+
+---
 
 ## Relationship plan
 
-- One user can own many subscriptions.
-- One user can collaborate on many subscriptions.
-- One subscription can have many invoices.
-- One invoice can have many credit notes.
-- One invoice can have many audit events.
-- The subscription-to-user relationship is intentionally modeled as a separate collaborator table rather than a many-to-many field to keep access control explicit and auditable.
+- **Users to Subscriptions (Ownership)**: One-to-Many (`users.id` -> `subscriptions.owner_id`).
+- **Users to Subscriptions (Collaboration)**: Many-to-Many via explicit `collaborators` mapping table with unique constraint `(subscription_id, user_id)`.
+- **Subscriptions to Invoices**: One-to-Many (`subscriptions.id` -> `invoices.subscription_id`).
+- **Invoices to Credit Notes**: One-to-Many (`invoices.id` -> `credit_notes.invoice_id`).
+- **Invoices to Audit Events**: One-to-Many (`invoices.id` -> `invoice_events.invoice_id`). Append-only timeline that cannot be edited or deleted.
 
-## Database vs application constraints
+---
 
-Database constraints should enforce basic integrity:
-- unique email addresses for users
-- foreign keys between subscriptions, invoices, and collaborators
-- not-null rules on required invoice fields
-- status checks for known state values
+## Database vs Application constraints
 
-Application logic should enforce deeper business rules:
-- only billing admins may manage collaborators
-- only the owner or authorized manager may create invoices
-- invoice immutability once paid
-- overdue status rules
-- audit trail restrictions
+### Database Constraints (Enforced at DB tier)
+- `email` uniqueness on `users`.
+- Foreign key integrity across all related tables with `CASCADE` or `PROTECT`.
+- Non-null constraints on financial amounts (`price`, `amount`), dates, and role fields.
+- Decimal precision (`DECIMAL(12, 2)`) to avoid IEEE floating point inaccuracy.
+- PostgreSQL Row-Level Security (RLS) policies enforcing row visibility and modification rules based on `current_setting('app.role')` and `current_setting('app.user_id')`.
+- Covering indexes:
+  - `idx_collaborators_sub_user` on `collaborators(subscription_id, user_id)`
+  - `idx_subscriptions_owner` on `subscriptions(owner_id)`
+  - `idx_invoices_subscription` on `invoices(subscription_id)`
+  - `idx_invoices_status` on `invoices(status)`
 
-The boundary is where the rules are operationally important and where simple DB validation would be too blunt.
+### Application Logic Constraints (Enforced in Django/DRF)
+- Only `billing_admin` users may invite/remove collaborators or archive subscriptions.
+- FSM state transitions on invoices (`Draft -> Issued -> Paid`, `Draft/Issued -> Void`).
+- Immutability of Paid invoices (no field modifications allowed; corrections only via credit notes).
+- Due date changes permitted on Draft and Issued invoices, but forbidden on Paid/Void invoices.
+- Rich HTTP 403 explanatory error messages for illegal actions.
+
+---
 
 ## Denormalization decisions
 
-We are not yet denormalizing aggressively. The system should favor normalized tables and explicit audit rows because billing rules and compliance history are sensitive. If denormalization is needed later, it should only be for read-heavy reporting endpoints such as dashboard totals, not for the source-of-truth invoice state.
+The design stays strictly normalized to preserve auditability and financial data integrity:
+- Subscription collaborator links live in a dedicated join table to keep permission history clear.
+- Credit notes stand as independent records referencing the original invoice rather than mutating original invoice totals.
+- Audit events are strictly append-only rows.
+
+---
 
 ## Scaling risk at 100x volume
 
-The first things that would become expensive are:
-- invoice search/filter queries across large sets
-- dashboard aggregate queries
-- large audit event history for every invoice
-- status-based overdue alerts that are recalculated often
-
-The likely first optimization would be indexes on subscription owner, invoice status, due date, and invoice subscription references, followed by reporting tables or materialized summaries if needed.
+At 100x volume, the main bottlenecks and mitigations are:
+1. **RLS Subquery Overhead**: Account manager queries that join `collaborators` across large datasets could force sequential scans. *Mitigation: Covering compound index `(subscription_id, user_id)`.*
+2. **Invoice Filtering & Search**: Text search across customer name and billing email with status/due-date filters. *Mitigation: Server-side pagination, compound indexes on `(status, due_date)`, and PostgreSQL `pg_trgm` or Gin indexes on email/name if search becomes hot.*
+3. **Dashboard Aggregations**: Dynamic grouping for 8-week revenue charts. *Mitigation: Aggregation queries filtered by indexed date ranges, or PostgreSQL materialized views refreshed periodically.*
