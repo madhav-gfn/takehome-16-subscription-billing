@@ -87,7 +87,7 @@ Set up env config and resolution in backend
 ```
 
 ### What you got
-working env and commit
+working env and commit  42c873692ddb8f715f0a3598cba1afc33c5fbf41
 
 ### What you corrected
 Nothing
@@ -104,7 +104,7 @@ Set up env config and resolution in backend
 ```
 
 ### What you got
-![alt text](image.png) and commit 1b8b5b079f105ffe4936a44c2d6a89dab6d07549
+
 
 ### What you corrected
 Nothing
