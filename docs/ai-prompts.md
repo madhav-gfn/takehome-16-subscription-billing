@@ -61,7 +61,7 @@ Its majorly a reference Knowledge document, so required no edits
 
 # 2.
 ## <What you were trying to achieve>
-I want to setup env config
+I want to connect the backend to frontend, just so i have a rough idea
 
 ### Prompt
 ```
@@ -72,4 +72,39 @@ We have a basic frontend working and basic backend working I want to connect bot
 ![alt text](image.png) and commit 1b8b5b079f105ffe4936a44c2d6a89dab6d07549
 
 ### What you corrected
-Its majorly a reference Knowledge document, so required no edits
+Nothing
+
+
+
+# 3.
+## <What you were trying to achieve>
+I want to setup env config
+
+### Prompt
+```
+Set up env config and resolution in backend
+
+```
+
+### What you got
+working env and commit
+
+### What you corrected
+Nothing
+
+
+# 4.
+## <What you were trying to achieve>
+implement all the authentication and authorization 
+
+### Prompt
+```
+Set up env config and resolution in backend
+
+```
+
+### What you got
+![alt text](image.png) and commit 1b8b5b079f105ffe4936a44c2d6a89dab6d07549
+
+### What you corrected
+Nothing
