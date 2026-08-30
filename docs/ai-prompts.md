@@ -69,8 +69,7 @@ We have a basic frontend working and basic backend working I want to connect bot
 ```
 
 ### What you got
-this file
-docs\Billing System Development Research.pdf
+![alt text](image.png) and commit 1b8b5b079f105ffe4936a44c2d6a89dab6d07549
 
 ### What you corrected
 Its majorly a reference Knowledge document, so required no edits
