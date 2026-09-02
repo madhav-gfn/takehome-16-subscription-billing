@@ -53,8 +53,10 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "corsheaders",
     "rest_framework",
+    "django_filters",
     # Project apps
     "src.accounts",
+    "src.billing",
 ]
 
 MIDDLEWARE = [
@@ -136,8 +138,13 @@ REST_FRAMEWORK = {
     "DEFAULT_PARSER_CLASSES": (
         "rest_framework.parsers.JSONParser",
     ),
-    # Consistent error responses
-    "EXCEPTION_HANDLER": "rest_framework.views.exception_handler",
+    "DEFAULT_FILTER_BACKENDS": (
+        "django_filters.rest_framework.DjangoFilterBackend",
+    ),
+    "DEFAULT_PAGINATION_CLASS": "src.billing.pagination.DefaultPagination",
+    "PAGE_SIZE": 25,
+    # One error envelope for everything: {"error": {code, message, field, details}}
+    "EXCEPTION_HANDLER": "src.billing.errors.exception_handler",
 }
 
 # =============================================================================
@@ -194,3 +201,37 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# =============================================================================
+# Production Hardening
+# =============================================================================
+# SECURE_PROXY_SSL_HEADER must go in alongside SECURE_SSL_REDIRECT. Behind a
+# TLS-terminating proxy (Render), the redirect loops infinitely without it.
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {"simple": {"format": "{levelname} {name}: {message}", "style": "{"}},
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "simple"}
+    },
+    "loggers": {
+        # Database trigger firings are logged here. Each one means a
+        # service-layer check was missed.
+        "src.billing": {"handlers": ["console"], "level": "INFO"},
+        "src.accounts": {"handlers": ["console"], "level": "INFO"},
+    },
+}
