@@ -73,8 +73,11 @@ class RLSTransactionMiddleware:
 
                 response = self.get_response(request)
 
-                # Roll back on server errors to prevent partial writes
-                if response.status_code >= 500:
+                # Roll back on any error response, not just 5xx. DRF turns a
+                # raised ValidationError into a 400 *response*, so without this
+                # any writes made before the validation failure would commit —
+                # exactly the class of bug that leaves half-written invoices.
+                if response.status_code >= 400:
                     transaction.set_rollback(True)
 
             return response
