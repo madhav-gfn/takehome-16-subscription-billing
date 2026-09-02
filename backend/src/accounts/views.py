@@ -1,3 +1,4 @@
+from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -88,3 +89,32 @@ class MeView(APIView):
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class UserListView(APIView):
+    """
+    GET /api/auth/users/?role=account_manager
+
+    A minimal directory: id, email and role only. Needed to populate the owner
+    picker (Goal 2), the collaborator picker (Goal 5) and the filter-by-owner
+    control (Goal 6).
+
+    Available to both roles: an account manager needs to see who owns what in
+    order to use the owner filter. It deliberately exposes nothing beyond the
+    three fields the pickers need.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        User = get_user_model()
+        users = User.objects.filter(is_active=True).order_by("email")
+        role = request.query_params.get("role")
+        if role:
+            users = users.filter(role=role)
+        return Response(
+            [
+                {"id": str(u.id), "email": u.email, "role": u.role}
+                for u in users
+            ]
+        )

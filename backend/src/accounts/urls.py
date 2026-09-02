@@ -14,4 +14,6 @@ urlpatterns = [
     path("refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     # GET — returns authenticated user's profile
     path("me/", views.MeView.as_view(), name="me"),
+    # GET — minimal user directory for owner/collaborator/filter pickers
+    path("users/", views.UserListView.as_view(), name="users"),
 ]
