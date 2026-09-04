@@ -127,3 +127,62 @@ At 100x volume, the main bottlenecks and mitigations are:
 1. **RLS Subquery Overhead**: Account manager queries that join `collaborators` across large datasets could force sequential scans. *Mitigation: Covering compound index `(subscription_id, user_id)`.*
 2. **Invoice Filtering & Search**: Text search across customer name and billing email with status/due-date filters. *Mitigation: Server-side pagination, compound indexes on `(status, due_date)`, and PostgreSQL `pg_trgm` or Gin indexes on email/name if search becomes hot.*
 3. **Dashboard Aggregations**: Dynamic grouping for 8-week revenue charts. *Mitigation: Aggregation queries filtered by indexed date ranges, or PostgreSQL materialized views refreshed periodically.*
+
+---
+
+## Final schema (4 September 2026)
+
+Everything above was the design written before migration. Below is what actually got migrated and is running in PostgreSQL.
+
+### What changed from the original design
+
+- `invoices` uses `period_start` and `period_end`, not `billing_period_start` / `billing_period_end`. Shorter names, same purpose.
+- `invoices` gained `issued_at` and `paid_at` (timestamps), denormalised from the event trail so the dashboard does not need to join `invoice_events` for monthly aggregations.
+- `invoices` gained `created_by` (FK to users). Needed to show who created the invoice in the timeline.
+- `collaborators` gained `added_by` (FK to users). Records which billing admin granted the access.
+- `credit_notes` gained `created_by` (FK to users). Records who issued the credit note.
+- A sixth table, `alert_dismissals`, was added for overdue alert dismissal. It is separate from `invoices` because recording a dismissal must not UPDATE an invoice that may be immutable.
+
+### Alert Dismissals (`alert_dismissals`)
+*Status: Migrated and active*
+
+- `id` -- `UUID` (Primary Key)
+- `invoice_id` -- `UUID` (OneToOne FK -> `invoices.id`, CASCADE)
+- `dismissed_for_due_date` -- `DATE` (the due date at the time of dismissal; if the invoice's due date later changes and passes again, the alert reappears)
+- `dismissed_by_id` -- `UUID` (FK -> `users.id`, SET NULL)
+- `dismissed_at` -- `TIMESTAMP WITH TIME ZONE`
+
+### Constraints actually in the database
+
+Beyond the ones listed in the original design above:
+
+**CHECK constraints:**
+- `sub_price_positive`: `price > 0` on subscriptions
+- `inv_amount_positive`: `amount > 0` on invoices
+- `inv_period_ordered`: `period_start <= period_end`
+- `inv_void_has_reason`: status is void if and only if void_reason is not null
+- `cn_amount_positive`: `amount > 0` on credit_notes
+
+**Partial unique index:**
+- `uq_invoice_period`: unique on `(subscription_id, period_start, period_end)` where status is not void. This means voiding an invoice frees the period so a corrected one can be generated.
+
+**Triggers (raw SQL in migration `0003_rls_and_triggers`):**
+- `trg_invoice_immutable`: BEFORE UPDATE on `invoices`. If the existing status is `paid`, rejects the update with an error message. This is the database-tier enforcement of Goal 4's immutability rule.
+- `trg_invoice_events_append_only`: BEFORE UPDATE OR DELETE on `invoice_events`. Always rejects. The timeline is physically write-once.
+
+### Updated denormalization
+
+Two deliberate denormalizations exist in the final schema:
+
+1. `invoices.issued_at` and `invoices.paid_at` duplicate information that could be derived from `invoice_events` (by finding the status_changed event where new_status is "issued" or "paid"). The duplicate exists so the dashboard query "revenue collected this month" is `SELECT SUM(amount) FROM invoices WHERE paid_at >= '2026-09-01'` instead of a subquery join against the events table. The service function `transition()` writes both the invoice field and the event in the same transaction, so they cannot drift.
+
+2. `alert_dismissals.dismissed_for_due_date` duplicates the invoice's `due_date` at the moment of dismissal. This is the re-arming mechanism: the alert query checks `WHERE dismissed_for_due_date != invoice.due_date OR dismissal IS NULL`, so changing the due date and having it pass again causes the alert to return even though the admin previously dismissed it.
+
+### Updated scaling risks
+
+At 100x volume (20,000 customers, ~240,000 invoices/year), three new concerns would appear:
+
+4. **Bulk generation throughput**: The current implementation loops through subscriptions in Python and creates invoices one at a time inside a single transaction. At 20,000 subscriptions this could hit statement timeout. Mitigation: batch the loop into chunks of 500 with separate transactions, or move to a `INSERT ... SELECT` pattern.
+5. **Audit trail growth**: Every status change creates an event row. At 240k invoices with an average of 3 events each, that is 720k rows/year. Not a problem for PostgreSQL, but the `idx_evt_invoice_time` index would need periodic `REINDEX` on high-write workloads.
+6. **RLS policy cost on the invoice list page**: The `visible_to` queryset does a subquery against `collaborators` for account managers. With 20,000 subscriptions and many collaborator rows, this subquery could become expensive. Mitigation: materialise the user-to-subscription mapping into a flat table refreshed on collaborator changes.
+

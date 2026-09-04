@@ -74,8 +74,77 @@ Client (React / Browser)
 Client receives HTTP 200 OK + User JSON Payload
 ```
 
-## What we decided not to build yet
+## What we decided not to build
 
-- **Subscription and Invoice Domain Models**: Next milestone after authentication and authorization foundations are solid.
-- **Frontend Dashboard / UI Views**: Frontend will be built on top of the tested API endpoints.
-- **Async Workers / Celery**: In-request processing is sufficient for the scope; bulk invoice operations can be executed synchronously within transactions.
+- **Async Workers / Celery**: In-request processing is sufficient for the scope; bulk invoice operations execute synchronously within transactions. At 200 customers, the bulk-generate endpoint finishes in under a second.
+- **WebSocket push**: The frontend polls on navigation rather than receiving live updates. Two admins viewing the same invoice will not see each other's changes until one of them refreshes. This is fine for the stated scenario.
+
+---
+
+## Final architecture (4 September 2026)
+
+Everything above was written during the initial scaffold phase. Below is the actual finished system.
+
+### Billing domain (`src.billing`)
+
+The billing app is the core of the system. It is split into layers:
+
+- **Models** (`models.py`): Subscription, Invoice, Collaborator, CreditNote, InvoiceEvent, AlertDismissal. All use UUID primary keys. Financial amounts are `DECIMAL(12, 2)`. The Invoice model has `issued_at` and `paid_at` denormalised from the event trail so dashboard aggregations are indexed range scans instead of joins.
+- **Enums** (`enums.py`): `BillingCycle`, `InvoiceStatus`, `EventType`, and `ALLOWED_TRANSITIONS` (the FSM adjacency map).
+- **Services** (`services/invoices.py`, `services/subscriptions.py`): All business rules live here, not in views or serializers. `transition()` is the only function in the codebase that writes `Invoice.status`. This single-writer property is what makes "every status change writes exactly one event" true by construction. `create_invoice()` checks for period collisions. `add_credit_note()` enforces the paid-only rule and the running total cap.
+- **Querysets** (`querysets.py`): `visible_to(user)` returns only the invoices/subscriptions a given user is allowed to see. Annotations for `is_overdue`, `days_overdue`, and `credited_total` are computed in SQL so filtering and sorting work server-side.
+- **Views** (`views.py`): Thin DRF views that delegate to services. Each view checks permissions via DRF permission classes, then calls the appropriate service function. Views never write to the database directly.
+- **Filters** (`filters.py`): Django-filter backend for the invoice list. Supports text search (`search`), status, overdue flag, owner, sorting by due date / amount / status, and pagination.
+- **Errors** (`errors.py`): Domain-specific exception classes (`InvoicePaidImmutable`, `InvalidTransition`, `VoidReasonRequired`, etc.) that map to HTTP 409 Conflict responses with human-readable messages.
+
+### Database tier enforcement
+
+Two things are enforced at the database level, not just in application code:
+
+1. **Immutability trigger** (`0003_rls_and_triggers.py`): A `BEFORE UPDATE` trigger on the `invoices` table prevents any column change on a paid invoice. This means even a raw SQL `UPDATE` against the database cannot silently modify a paid invoice. The trigger raises a PostgreSQL exception with an explanatory message.
+2. **Append-only audit trail** (`0003_rls_and_triggers.py`): A trigger on `invoice_events` blocks all `UPDATE` and `DELETE` operations. The timeline is physically write-once.
+
+### Request path: marking an invoice as paid
+
+```
+Client (React)
+  |
+  | POST /api/invoices/{id}/pay/
+  | Header: "Authorization: Bearer <JWT>"
+  v
+1. RLSTransactionMiddleware:
+   - Decodes JWT, extracts user_id and role
+   - Opens transaction.atomic()
+   - SET LOCAL app.user_id = '...';
+   - SET LOCAL app.role = 'billing_admin';
+
+2. URL routing -> InvoiceViewSet.pay()
+
+3. DRF permission check: CanManageInvoiceLifecycle
+   - Verifies user is billing_admin (account managers cannot pay)
+   - Returns 403 with explanation if not
+
+4. services.invoices.transition(invoice, 'paid', actor):
+   - SELECT ... FOR UPDATE (row lock prevents double-pay)
+   - Checks ALLOWED_TRANSITIONS: issued -> paid is valid
+   - Sets invoice.status = 'paid', invoice.paid_at = now()
+   - Calls save(update_fields=['status', 'paid_at', 'updated_at'])
+   - PostgreSQL immutability trigger: passes (status was not 'paid' before)
+   - Creates InvoiceEvent(type=status_changed, old='issued', new='paid')
+   - Append-only trigger: allows INSERT, would block UPDATE/DELETE
+
+5. Transaction commits
+   - SET LOCAL variables cleared automatically
+
+6. Response: 200 OK with serialised invoice
+```
+
+### The detailed design documents in `doc2/`
+
+Before writing any billing code, I wrote a comprehensive set of design documents covering the domain model, database schema, authorization matrix, API contract, build plans, testing strategy, seed data, and deployment. The full list is in `doc2/00-README.md`. The most important ones:
+
+- `doc2/02-domain-model.md`: Every ambiguity in the brief that I had to rule on, numbered and recorded.
+- `doc2/04-authorization-matrix.md`: The complete permission matrix for every action by role.
+- `doc2/05-api-contract.md`: Every endpoint, its method, URL, request body, and response shape.
+- `doc2/13-risks-and-decisions.md`: Risk register and design decisions made before coding.
+

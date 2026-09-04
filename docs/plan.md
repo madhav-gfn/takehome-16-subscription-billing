@@ -43,433 +43,92 @@ The backend scaffolding took far less time than the full billing logic will take
 - A stronger production database and deployment environment will come after the core business model is working and tested.
 
 
-## plan for auth
-```
-# JWT-Based RBAC Authentication & Authorization with PostgreSQL RLS
-
-Build a defense-in-depth auth system with two layers: application-level JWT middleware and database-level Row-Level Security (RLS) policies on PostgreSQL.
-
-## Audit Summary — Current State
-
-| Layer | Status | Details |
-|-------|--------|---------|
-| Backend | Early scaffold | Django 5.1 with a health endpoint. No apps, no models, no auth. SQLite DB. |
-| Frontend | Bare Vite+React | Default boilerplate, no routing, no auth context |
-| Database | SQLite (dev) | No tables beyond Django defaults, no migrations |
-| Auth | None | No user model, no JWT, no RBAC, no RLS |
-
-The project is essentially a blank shell — the entire auth system will be built from scratch.
-
----
-
-## User Review Required
-
-> [!IMPORTANT]
-> **PostgreSQL is a prerequisite.** The plan assumes you will set up a PostgreSQL instance (local or hosted) **before** execution begins. The `.env` will need `DATABASE_URL` or individual `DB_*` variables. I will not create or modify the PG instance itself.
-
-> [!IMPORTANT]
-> **Django vs. raw SQL for RLS.** Django's ORM does not natively support `SET LOCAL` session variables or RLS policies. We will use **raw SQL migrations** for RLS policy creation, and a **custom database backend / middleware** to inject `SET LOCAL` at the start of each request's transaction. This is non-trivial but necessary for defense-in-depth.
-
-> [!WARNING]
-> **Bypassing Django's built-in `auth.User`.** Django's default `User` model uses session-based auth. We will replace it with a **custom `User` model** (`AUTH_USER_MODEL`) that stores `role` and uses `UUID` primary keys — required for RLS `current_setting('app.user_id')::UUID` patterns. This must be done **before** the first `migrate`.
-
----
-
-## Open Questions
-
-> [!IMPORTANT]
-> **1. JWT Library:** Should we use **`djangorestframework-simplejwt`** (requires DRF) or **`PyJWT`** (lightweight, manual token handling)? I recommend `PyJWT` + manual middleware to avoid pulling in all of DRF for just auth, but if you plan to use DRF for the rest of the API, `simplejwt` is more ergonomic. **Which do you prefer?**
-
-> [!IMPORTANT]
-> **2. Password Hashing:** Django's built-in `make_password` / `check_password` (uses PBKDF2 by default) is battle-tested. Should we use that, or do you prefer `bcrypt` / `argon2`?
-
-> [!IMPORTANT]
-> **3. Token Refresh Strategy:** Should we implement a refresh token flow (access + refresh token pair, with the refresh token stored in httpOnly cookie or DB), or keep it simple with a single JWT access token with a longer expiry?
-
-> [!IMPORTANT]
-> **4. Connection Pooling:** The spec mentions PgBouncer for safe `SET LOCAL` handling. For development, are you planning to set up PgBouncer, or should we just use Django's direct connections for now and document PgBouncer as a production concern?
-
----
-
-## Proposed Changes
-
-### Component 1: Custom User Model & Django App
-
-This is the foundation — a new `accounts` Django app with a custom `User` model using UUID PKs and a `role` field.
-
-#### [NEW] [`backend/src/accounts/__init__.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/__init__.py)
-Empty init file for the accounts app.
-
-#### [NEW] [`backend/src/accounts/apps.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/apps.py)
-Django app config: `name = "src.accounts"`, `default_auto_field = "django.db.models.BigAutoField"`.
-
-#### [NEW] [`backend/src/accounts/models.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/models.py)
-Custom User model:
-```python
-class Role(models.TextChoices):
-    BILLING_ADMIN = "billing_admin", "Billing Admin"
-    ACCOUNT_MANAGER = "account_manager", "Account Manager"
-
-class User(AbstractBaseUser):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    email = models.EmailField(unique=True)
-    role = models.CharField(max_length=20, choices=Role.choices)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ["role"]
-
-    objects = UserManager()  # custom manager for create_user / create_superuser
-```
-- UUID PK is critical — RLS policies cast `current_setting('app.user_id')` to `UUID`.
-- No `username` field — email is the sole login identifier.
-- `AbstractBaseUser` gives us `password` field + `set_password()` / `check_password()` for free.
-
-#### [NEW] [`backend/src/accounts/managers.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/managers.py)
-Custom `UserManager(BaseUserManager)` with `create_user(email, password, role)` and `create_superuser(...)` methods.
-
----
-
-### Component 2: JWT Token Utilities
-
-Stateless token generation and verification — no Django sessions involved.
-
-#### [NEW] [`backend/src/accounts/jwt_utils.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/jwt_utils.py)
-```python
-def generate_tokens(user) -> dict:
-    """Generate access + refresh token pair."""
-    access_payload = {
-        "user_id": str(user.id),
-        "email": user.email,
-        "role": user.role,
-        "type": "access",
-        "iat": now,
-        "exp": now + ACCESS_TOKEN_LIFETIME,  # e.g. 15 min
-        "jti": uuid4().hex,
-    }
-    refresh_payload = {
-        "user_id": str(user.id),
-        "type": "refresh",
-        "iat": now,
-        "exp": now + REFRESH_TOKEN_LIFETIME,  # e.g. 7 days
-        "jti": uuid4().hex,
-    }
-    return {
-        "access": jwt.encode(access_payload, SECRET_KEY, algorithm="HS256"),
-        "refresh": jwt.encode(refresh_payload, SECRET_KEY, algorithm="HS256"),
-    }
-
-def decode_token(token: str) -> dict:
-    """Decode and validate a JWT. Raises jwt.InvalidTokenError on failure."""
-    return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-```
-- `role` is embedded directly in the access token — the middleware reads it without a DB query.
-- `jti` (JWT ID) allows future token blacklisting if needed.
-- Separate `type` field prevents refresh tokens being used as access tokens.
-
-#### [NEW] [`backend/src/accounts/jwt_settings.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/jwt_settings.py)
-Centralized JWT configuration pulled from env vars:
-- `JWT_SECRET_KEY` (falls back to `DJANGO_SECRET_KEY`)
-- `JWT_ACCESS_TOKEN_LIFETIME_MINUTES` (default: 30)
-- `JWT_REFRESH_TOKEN_LIFETIME_DAYS` (default: 7)
-- `JWT_ALGORITHM` (default: "HS256")
-
----
-
-### Component 3: Authentication Middleware
-
-Intercepts every request, extracts the JWT from the `Authorization: Bearer <token>` header, validates it, and attaches the authenticated user context to the request object.
-
-#### [NEW] [`backend/src/accounts/middleware.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/middleware.py)
-```python
-class JWTAuthenticationMiddleware:
-    """
-    Reads Bearer token from Authorization header.
-    On success: sets request.user_id, request.user_role, request.user_email.
-    On failure or absence: sets request.user_id = None (anonymous).
-    Does NOT enforce auth — individual views/decorators decide if auth is required.
-    """
-    def __call__(self, request):
-        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            try:
-                payload = decode_token(token)
-                if payload.get("type") != "access":
-                    raise InvalidTokenError("Not an access token")
-                request.user_id = payload["user_id"]
-                request.user_role = payload["role"]
-                request.user_email = payload["email"]
-            except (InvalidTokenError, KeyError):
-                request.user_id = None
-                request.user_role = None
-        else:
-            request.user_id = None
-            request.user_role = None
-        return self.get_response(request)
-```
-
----
-
-### Component 4: Authorization Decorators
-
-Reusable decorators for view-level RBAC enforcement.
-
-#### [NEW] [`backend/src/accounts/decorators.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/decorators.py)
-```python
-def login_required(view_func):
-    """Rejects unauthenticated requests with 401."""
-
-def role_required(*allowed_roles):
-    """Rejects requests from users whose role is not in allowed_roles with 403.
-    Returns: {"error": "Forbidden", "message": "..."} explaining why."""
-
-def billing_admin_required(view_func):
-    """Shorthand for role_required(Role.BILLING_ADMIN)."""
-
-def owner_or_collaborator_required(view_func):
-    """For subscription-scoped endpoints: checks request.user_id is
-    the subscription owner or a collaborator. Billing admins pass automatically.
-    Account managers without ownership/collaboration get 403."""
-```
-Each decorator returns a JSON response with an explanatory message on rejection — never a silent redirect.
-
----
-
-### Component 5: Auth API Views (Login / Register / Refresh / Me)
-
-#### [NEW] [`backend/src/accounts/views.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/views.py)
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `POST /api/auth/register/` | POST | None | Create a new user (email, password, role). Returns tokens. |
-| `POST /api/auth/login/` | POST | None | Email + password login. Returns access + refresh tokens. |
-| `POST /api/auth/refresh/` | POST | None | Exchange a valid refresh token for a new access token. |
-| `GET /api/auth/me/` | GET | Required | Returns the current user's profile (id, email, role). |
-
-Request/response validation is done manually (no DRF serializers) — parse `json.loads(request.body)`, validate fields, return `JsonResponse`.
-
-#### [NEW] [`backend/src/accounts/urls.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/urls.py)
-```python
-urlpatterns = [
-    path("register/", views.register, name="register"),
-    path("login/", views.login, name="login"),
-    path("refresh/", views.refresh, name="refresh"),
-    path("me/", views.me, name="me"),
-]
-```
-
----
-
-### Component 6: PostgreSQL Database Configuration
-
-Switch from SQLite to PostgreSQL in Django settings.
-
-#### [MODIFY] [`backend/src/config/settings.py`](file:///d:/takehome-16-subscription-billing/backend/src/config/settings.py)
-
-Changes:
-1. **Database engine**: `django.db.backends.postgresql` with env-driven config (`DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`).
-2. **`AUTH_USER_MODEL`**: Set to `"accounts.User"`.
-3. **`INSTALLED_APPS`**: Add `"src.accounts"`.
-4. **Middleware**: Add `"src.accounts.middleware.JWTAuthenticationMiddleware"` after `CommonMiddleware`.
-5. **Remove** session-related middleware (`SessionMiddleware`, `AuthenticationMiddleware`) since we use stateless JWT — or keep them for Django admin access only.
-6. **JWT settings**: Add `JWT_SECRET_KEY`, `JWT_ACCESS_TOKEN_LIFETIME`, `JWT_REFRESH_TOKEN_LIFETIME` from env.
-
-#### [MODIFY] [`backend/src/config/urls.py`](file:///d:/takehome-16-subscription-billing/backend/src/config/urls.py)
-Wire up the auth URLs:
-```python
-urlpatterns = [
-    path("health/", health, name="health"),
-    path("api/auth/", include("src.accounts.urls")),
-]
-```
-
-#### [MODIFY] [`backend/.env`](file:///d:/takehome-16-subscription-billing/backend/.env)
-Add PostgreSQL connection variables:
-```
-DB_NAME=subscription_billing
-DB_USER=postgres
-DB_PASSWORD=<your-password>
-DB_HOST=localhost
-DB_PORT=5432
-JWT_SECRET_KEY=<long-random-secret>
-```
-
-#### [MODIFY] [`requirements.txt`](file:///d:/takehome-16-subscription-billing/requirements.txt)
-Add:
-```
-psycopg2-binary==2.9.9
-PyJWT==2.9.0
-```
-
----
-
-### Component 7: RLS Database Middleware (SET LOCAL)
-
-This is the critical bridge between JWT auth and PostgreSQL RLS. Every request's DB transaction must have `app.user_id` and `app.role` set as session variables so RLS policies can read them.
-
-#### [NEW] [`backend/src/accounts/db_rls_middleware.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/db_rls_middleware.py)
-```python
-class RLSMiddleware:
-    """
-    After JWTAuthenticationMiddleware has parsed the token:
-    1. Wraps the request in a DB transaction.
-    2. Executes SET LOCAL app.user_id = '...'; SET LOCAL app.role = '...';
-    3. All subsequent ORM queries in this request see the RLS-filtered data.
-    4. Transaction commits on success, rolls back on exception.
-
-    For unauthenticated requests (no valid JWT), sets app.role = 'anonymous'
-    and app.user_id = '' — RLS policies will deny everything.
-    """
-    def __call__(self, request):
-        user_id = getattr(request, "user_id", None) or ""
-        role = getattr(request, "user_role", None) or "anonymous"
-
-        with connection.cursor() as cursor:
-            # SET LOCAL scopes the variable to the current transaction only.
-            # This is critical for connection pooling safety.
-            cursor.execute("SET LOCAL app.user_id = %s", [str(user_id)])
-            cursor.execute("SET LOCAL app.role = %s", [role])
-
-        response = self.get_response(request)
-        return response
-```
-
-> [!WARNING]
-> **`SET LOCAL` only works inside a transaction.** We need Django's `ATOMIC_REQUESTS = True` in the database config, or wrap this in `transaction.atomic()`. The plan uses `ATOMIC_REQUESTS = True` for simplicity.
-
----
-
-### Component 8: RLS Policies (SQL Migration)
-
-Raw SQL migration to enable RLS on all billing tables and create the policies. This migration runs **after** the model migrations.
-
-#### [NEW] [`backend/src/accounts/migrations/0002_rls_policies.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/migrations/0002_rls_policies.py)
-
-This is a `RunSQL` migration with the following policies:
-
-**Subscriptions table:**
-
-| Policy | Target | Operation | Logic |
-|--------|--------|-----------|-------|
-| `rls_sub_admin_all` | `billing_admin` | ALL | `current_setting('app.role') = 'billing_admin'` |
-| `rls_sub_owner_select` | `account_manager` | SELECT | `owner_id = current_setting('app.user_id')::UUID` |
-| `rls_sub_collab_select` | `account_manager` | SELECT | `EXISTS (SELECT 1 FROM collaborators WHERE sub_id = id AND user_id = current_setting('app.user_id')::UUID)` |
-| `rls_sub_owner_update` | `account_manager` | UPDATE | Owner/collaborator check + `archived_at IS NOT DISTINCT FROM` old value (prevents archiving) |
-| `rls_sub_manager_insert` | `account_manager` | INSERT | `current_setting('app.role') IN ('billing_admin','account_manager')` — managers can create |
-
-**Invoices table:**
-
-| Policy | Target | Operation | Logic |
-|--------|--------|-----------|-------|
-| `rls_inv_admin_all` | `billing_admin` | ALL | Role check |
-| `rls_inv_owner_select` | `account_manager` | SELECT | Join through subscription to check ownership/collaboration |
-| `rls_inv_owner_insert` | `account_manager` | INSERT | Same join — managers can only create invoices for their subscriptions |
-
-**Collaborators table:**
-
-| Policy | Target | Operation | Logic |
-|--------|--------|-----------|-------|
-| `rls_collab_admin_all` | `billing_admin` | ALL | Only admins can INSERT/DELETE collaborators |
-| `rls_collab_manager_select` | `account_manager` | SELECT | Managers can see collaborations they're part of |
-
-**Supporting SQL:**
-```sql
--- Enable RLS on each table (RLS is off by default)
-ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE collaborators ENABLE ROW LEVEL SECURITY;
-
--- Force RLS even for table owners (the Django DB user)
-ALTER TABLE subscriptions FORCE ROW LEVEL SECURITY;
-ALTER TABLE invoices FORCE ROW LEVEL SECURITY;
-ALTER TABLE collaborators FORCE ROW LEVEL SECURITY;
-```
-
-**Critical index for RLS performance:**
-```sql
--- Covering index to prevent sequential scans in the collaborators subquery
-CREATE INDEX idx_collaborators_sub_user ON collaborators(subscription_id, user_id);
-CREATE INDEX idx_subscriptions_owner ON subscriptions(owner_id);
-CREATE INDEX idx_invoices_subscription ON invoices(subscription_id);
-```
-
----
-
-### Component 9: Seed Data Management Command
-
-#### [NEW] [`backend/src/accounts/management/commands/seed_users.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/management/commands/seed_users.py)
-Creates demo users for testing:
-```
-| Role            | Email                    | Password   |
-|-----------------|--------------------------|------------|
-| Billing Admin   | admin@example.com        | admin123   |
-| Account Manager | manager1@example.com     | manager123 |
-| Account Manager | manager2@example.com     | manager123 |
-```
-
----
-
-### Component 10: File Structure Summary
-
-After implementation, the `backend/src/accounts/` directory will look like:
-
-```
-backend/src/accounts/
-├── __init__.py
-├── apps.py
-├── models.py              # User model with UUID PK + role
-├── managers.py            # UserManager
-├── jwt_utils.py           # Token generation + decoding
-├── jwt_settings.py        # Centralized JWT config
-├── middleware.py           # JWT auth middleware
-├── db_rls_middleware.py    # SET LOCAL middleware for RLS
-├── decorators.py          # @login_required, @role_required, etc.
-├── views.py               # Login, register, refresh, me
-├── urls.py                # Auth URL routing
-├── management/
-│   └── commands/
-│       └── seed_users.py  # Demo data seeding
-└── migrations/
-    ├── 0001_initial.py    # Auto-generated model migration
-    └── 0002_rls_policies.py  # Raw SQL RLS policies
-```
-
----
-
-## Verification Plan
-
-### Automated Tests
-
-#### [NEW] [`backend/src/accounts/tests.py`](file:///d:/takehome-16-subscription-billing/backend/src/accounts/tests.py)
-Test cases covering:
-
-1. **Registration**: Valid registration returns tokens; duplicate email returns 400; missing fields return 400.
-2. **Login**: Correct credentials return tokens; wrong password returns 401; non-existent user returns 401.
-3. **Token validation**: Expired tokens return 401; malformed tokens return 401; refresh tokens cannot be used as access tokens.
-4. **Token refresh**: Valid refresh token returns new access token; expired refresh token returns 401.
-5. **`/me` endpoint**: Returns correct user data with valid token; returns 401 without token.
-6. **Role enforcement (Application layer)**:
-   - Billing admin can access admin-only endpoints → 200
-   - Account manager accessing admin-only endpoint → 403 with explanatory message
-   - Account manager accessing own subscription → 200
-   - Account manager accessing another's subscription → 403
-7. **RLS enforcement (Database layer)**:
-   - Direct ORM query with `app.role = 'account_manager'` set → only sees own/collaborated subscriptions
-   - Direct ORM query with `app.role = 'billing_admin'` → sees all subscriptions
-   - Account manager cannot see or modify subscriptions they don't own/collaborate on even if application middleware is bypassed
-
-```bash
-cd backend && python main.py test src.accounts
-```
-
-### Manual Verification
-
-1. Start the Django dev server, hit `POST /api/auth/register/` and `POST /api/auth/login/` with curl/Postman.
-2. Use the returned JWT to hit `GET /api/auth/me/` — confirm user data.
-3. Attempt to hit a billing-admin-only endpoint with an account_manager JWT — confirm 403.
-4. Verify RLS by connecting directly to PostgreSQL and running `SET LOCAL app.role = 'account_manager'; SET LOCAL app.user_id = '<manager-uuid>'; SELECT * FROM subscriptions;` — confirm only owned/collaborated rows are returned.
-
-```
+## Detailed planning: doc2/
+
+After finishing Goal 1 (auth), I stopped coding and spent a full session writing detailed design documents before touching any billing code. These live in `doc2/` and cover sixteen files. The most important ones:
+
+- `doc2/00-README.md`: Table of contents and how the docs relate to each other.
+- `doc2/01-current-state-audit.md`: An honest audit of the codebase at that point, including three bugs found in the RLS SQL I had already committed.
+- `doc2/02-domain-model.md`: Every ambiguity in the brief that needed a ruling. Numbered A-01 through A-18. For example: can an account manager who owns a subscription also void its invoices? The brief says no, and I recorded why.
+- `doc2/03-database-schema.md`: The actual schema that would be migrated, including the differences from the design in `docs/schema.md` (added `issued_at`, `paid_at`, the partial unique index, the `alert_dismissals` table).
+- `doc2/04-authorization-matrix.md`: Complete permission matrix for every action by role. This is the single source of truth that both the DRF permission classes and the RLS policies implement.
+- `doc2/05-api-contract.md`: Every endpoint with method, URL, request body, response shape, and error codes.
+- `doc2/06-backend-build-plan.md`: Step-by-step build order for the backend, with file names and what goes in each.
+- `doc2/07-frontend-build-plan.md`: Same for the frontend.
+- `doc2/13-risks-and-decisions.md`: Risk register and additional design decisions.
+- `doc2/14-backend-code-scaffolds.md`: Pseudocode scaffolds for every service function and view.
+
+This planning session was the most valuable part of the project. It caught three bugs before they reached production, forced me to make explicit decisions about every ambiguity in the brief, and gave me a build order I could follow without stopping to think about architecture.
+
+## Session-by-session build log
+
+### Session 1 (~1.5h): Project setup
+- Initialised Django backend, React frontend, connected them with a health check.
+- Set up CORS, environment variable loading, PostgreSQL configuration.
+- Commits: `03694bf` through `1b8b5b0`.
+
+### Session 2 (~2.5h): Authentication and RLS
+- Built custom User model, JWT auth with embedded claims, RLS middleware.
+- Wrote 36 unit tests for models, auth, permissions, and middleware.
+- Wrote RLS policies SQL file (not yet applied, because the tables did not exist).
+- This was the hardest session because `SET LOCAL` interaction with Django's connection pooling required careful testing.
+- Commits: `a4d02ab`.
+
+### Session 3 (~2h): Design documents
+- Wrote all sixteen `doc2/` files.
+- Audited existing code and found three bugs in the RLS SQL. Documented them in `doc2/01-current-state-audit.md` and `doc2/13-risks-and-decisions.md`.
+- Decided to use triggers instead of RLS for immutability enforcement (Decision 6 in `docs/decisions.md`).
+- Commits: `579b7bd`.
+
+### Session 4 (~2h): Billing models and database
+- Built all billing models: Subscription, Invoice, Collaborator, CreditNote, InvoiceEvent, AlertDismissal.
+- Wrote migrations including raw SQL for triggers and RLS policies.
+- Built the service layer: `services/invoices.py` (transition, create, edit, credit note, add note) and `services/subscriptions.py`.
+- Commits: `382368f` through `624b452`.
+
+### Session 5 (~2h): API layer
+- Built DRF views, serializers, filters, and URL routing for the entire billing API.
+- Implemented server-side invoice search with text search, status/overdue/owner filters, sorting, and pagination.
+- Built bulk generation endpoint and CSV export.
+- Built dashboard aggregation endpoint.
+- Built overdue alerts endpoint with dismissal and re-arming.
+- Commits: `67a7eb4` through `1224294`.
+
+### Session 6 (~1.5h): Seed data and frontend
+- Wrote `seed_demo` management command with relative dates and realistic test data.
+- Built the entire React frontend: login, dashboard, subscriptions list, subscription detail, invoice detail with timeline, invoice list with filters, bulk generate page, alerts page.
+- Commits: `731ac63`, `5e696cb`.
+
+### Session 7 (~2h): Testing and documentation
+- Ran the full system end-to-end against a live PostgreSQL database.
+- Fixed bugs found during testing: `DurationField` vs `timedelta` mismatch in annotation, seed data `CheckConstraint` conflict with paid invoices, various linting warnings.
+- Updated all `docs/` files to reflect the finished system.
+- Commits: `d8f6cfd` and the final documentation commit.
+
+## Time estimate vs reality
+
+| Session | Estimated | Actual | Notes |
+|---------|-----------|--------|-------|
+| Project setup | 1h | 1.5h | CORS and env config took longer than expected. |
+| Auth and RLS | 2h | 2.5h | SET LOCAL with connection pooling was fiddly. |
+| Design documents | 1h | 2h | Worth every minute. The audit found three bugs. |
+| Billing models and services | 2h | 2h | On target, because the doc2 plans were detailed enough to follow. |
+| API layer | 2h | 2h | On target. |
+| Seed data and frontend | 2h | 1.5h | Faster than expected because the API was clean. |
+| Testing and docs | 1h | 2h | Found and fixed real bugs. |
+| **Total** | **11h** | **~14h** | Over by about 3 hours. |
+
+The overshoot came from two places: the design documents (which were not in the original estimate but paid for themselves) and the bug fixes during final testing. If I had skipped the doc2 session, the bugs would have surfaced later and probably cost more time to find, so the net effect was probably break-even.
+
+## What got cut
+
+In order of priority, these were the things I decided to cut before I started coding:
+
+1. Concurrency tests (two threads hitting the same invoice). The `select_for_update` is there but untested under real concurrency.
+2. RLS integration tests against a real PostgreSQL container in CI. The unit tests mock out RLS.
+3. Inline subscription editing on the subscriptions list page. You have to click through to the detail page.
+4. Real-time updates via WebSocket. The frontend polls on navigation.
+5. Interactive revenue chart (click a bar to see invoices from that week).
+
+What I did not cut under any circumstances: the invoice state machine with specific rejection messages, the append-only timeline with database-tier enforcement, server-side filtering and pagination, and the RLS test suite.
+For the detailed auth plan that kicked off Session 2, refer to the original implementation plan preserved in doc3/plan.md. For the full billing domain build plans, refer to the sixteen design documents in doc2/.
