@@ -197,8 +197,8 @@ class Command(BaseCommand):
                 # Older periods are settled.
                 paid_on = invoice.due_date + timedelta(days=random.randint(-3, 4))
                 self._advance(invoice, InvoiceStatus.PAID, admin, when=paid_on)
-            elif age == 1 and flags.get("overdue"):
-                pass  # left issued and past due -> alerts
+            elif age == 1 and (flags.get("overdue") or flags.get("void")):
+                pass  # left issued and past due -> alerts or void in _apply_flavour
             elif age == 1:
                 self._advance(invoice, InvoiceStatus.PAID, admin,
                               when=invoice.due_date - timedelta(days=1))

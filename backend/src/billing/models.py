@@ -181,22 +181,43 @@ class Invoice(models.Model):
         """Ruling A-07. Mirrors the SQL annotation in querysets.py exactly —
         two definitions drifting apart would put a wrong badge next to a
         correct filter."""
+        if hasattr(self, "_is_overdue"):
+            return self._is_overdue
         return (
             self.status == InvoiceStatus.ISSUED
             and self.due_date < timezone.localdate()
         )
 
+    @is_overdue.setter
+    def is_overdue(self, value):
+        self._is_overdue = value
+
     @property
     def days_overdue(self):
+        if hasattr(self, "_days_overdue"):
+            val = self._days_overdue
+            if hasattr(val, "days"):
+                return val.days
+            return val or 0
         if not self.is_overdue:
             return 0
         return (timezone.localdate() - self.due_date).days
 
+    @days_overdue.setter
+    def days_overdue(self, value):
+        self._days_overdue = value
+
     @property
     def credited_total(self):
         """Prefer the annotated value in list contexts — this is a query."""
+        if hasattr(self, "_credited_total"):
+            return self._credited_total
         total = self.credit_notes.aggregate(t=Sum("amount"))["t"]
         return total or Decimal("0.00")
+
+    @credited_total.setter
+    def credited_total(self, value):
+        self._credited_total = value
 
 
 class CreditNote(models.Model):

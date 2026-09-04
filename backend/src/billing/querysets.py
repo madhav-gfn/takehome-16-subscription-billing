@@ -13,6 +13,7 @@ from django.db.models import (
     BooleanField,
     Case,
     DecimalField,
+    DurationField,
     F,
     IntegerField,
     Q,
@@ -67,7 +68,7 @@ def annotate_invoice_flags(qs, today=None):
         days_overdue=Case(
             When(overdue, then=Value(today) - F("due_date")),
             default=Value(timedelta(0)),
-            output_field=IntegerField(),
+            output_field=DurationField(),
         ),
         credited_total=Coalesce(
             Sum("credit_notes__amount"),

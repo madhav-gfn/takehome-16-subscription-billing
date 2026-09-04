@@ -74,7 +74,7 @@ export function SkeletonRows({ cols = 5, rows = 6 }) {
  * these are exactly the states that get skipped under time pressure.
  */
 export function DataTable({
-  columns, rows, loading, error, slow, empty, onRetry,
+  columns, rows, loading, error, empty, onRetry,
   sort, onSort, rowKey = (r) => r.id,
 }) {
   if (loading) return <SkeletonRows cols={columns.length} />

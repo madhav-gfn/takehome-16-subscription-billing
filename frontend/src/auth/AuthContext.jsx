@@ -12,10 +12,10 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   // `loading` matters: without it, a page refresh renders RequireAuth before
   // /me/ resolves and bounces a signed-in user back to the login screen.
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => Boolean(tokens.access))
 
   useEffect(() => {
-    if (!tokens.access) { setLoading(false); return }
+    if (!tokens.access) return
     authApi.me()
       .then(setUser)
       .catch(() => tokens.clear())

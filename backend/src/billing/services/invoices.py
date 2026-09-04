@@ -1,4 +1,4 @@
-"""Invoice rules (Goals 3, 4, 9).
+r"""Invoice rules (Goals 3, 4, 9).
 
 Everything that can change an invoice goes through this module. In particular
 `transition` is the ONLY function in the codebase that assigns Invoice.status —

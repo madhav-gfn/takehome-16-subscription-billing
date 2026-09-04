@@ -4,7 +4,7 @@ import { useApi, useAction } from '../hooks/useApi'
 import { useQueryFilters } from '../hooks/useQueryFilters'
 import { useDebounced } from '../hooks/useDebounced'
 import { useAuth } from '../auth/AuthContext'
-import { authApi, subscriptionsApi } from '../api/resources'
+import { subscriptionsApi } from '../api/resources'
 import {
   DataTable, ErrorBanner, Modal, Money, Pagination,
 } from '../components/common'
