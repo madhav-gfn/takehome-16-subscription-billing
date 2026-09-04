@@ -1,4 +1,5 @@
 import os
+import urllib.parse
 from datetime import timedelta
 from pathlib import Path
 
@@ -107,19 +108,35 @@ AUTH_USER_MODEL = "accounts.User"
 # PgBouncer config should use transaction pooling (pool_mode = transaction)
 # to ensure SET LOCAL variables don't leak between requests.
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("DB_NAME", "billing"),
-        "USER": os.getenv("DB_USER", "postgres"),
-        "PASSWORD": os.getenv("DB_PASSWORD", ""),
-        "HOST": os.getenv("DB_HOST", "localhost"),
-        "PORT": os.getenv("DB_PORT", "5432"),
-        # Connection pooling at the Django level
-        "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "600")),
-        "CONN_HEALTH_CHECKS": True,
+_db_url = os.getenv("DATABASE_URL")
+if _db_url:
+    _parsed_db = urllib.parse.urlparse(_db_url)
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": _parsed_db.path.lstrip("/"),
+            "USER": _parsed_db.username or "postgres",
+            "PASSWORD": _parsed_db.password or "",
+            "HOST": _parsed_db.hostname or "localhost",
+            "PORT": str(_parsed_db.port or 5432),
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "600")),
+            "CONN_HEALTH_CHECKS": True,
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("DB_NAME", "billing"),
+            "USER": os.getenv("DB_USER", "postgres"),
+            "PASSWORD": os.getenv("DB_PASSWORD", ""),
+            "HOST": os.getenv("DB_HOST", "localhost"),
+            "PORT": os.getenv("DB_PORT", "5432"),
+            # Connection pooling at the Django level
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "600")),
+            "CONN_HEALTH_CHECKS": True,
+        }
+    }
 
 # =============================================================================
 # Django REST Framework
