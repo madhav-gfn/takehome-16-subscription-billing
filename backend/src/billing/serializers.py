@@ -85,7 +85,11 @@ class SubscriptionDetailSerializer(SubscriptionSerializer):
         # Goal 3: "Opening a subscription shows all of its invoices."
         from .querysets import annotate_invoice_flags
 
-        qs = annotate_invoice_flags(obj.invoices.all()).order_by("-period_start")
+        qs = (
+            annotate_invoice_flags(obj.invoices.all())
+            .select_related("subscription__owner")
+            .order_by("-period_start")
+        )
         return InvoiceListSerializer(qs, many=True, context=self.context).data
 
 
